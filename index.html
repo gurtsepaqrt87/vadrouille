@@ -1,6 +1,30 @@
 <!doctype html>
 <html lang="fr">
-<!-- VERSION v5.23.1 : chercher "v5.23" (Ctrl+U, Ctrl+F).
+<!-- VERSION v5.24.2 : chercher "v5.24" (Ctrl+U, Ctrl+F).
+     v5.24.2 = BOUTON DIRECT AUTO-OFF : retour terrain du 19/10 -
+     apres le toggle OFF (purge de live.json cote depot), le bouton
+     Direct ne disparaissait qu au REFRESH MANUEL. Cause : le catch
+     du pollLive ne remettait pas "live" a zero - la derniere
+     position restait valide (< 30 min) en memoire. Desormais, un
+     live.json introuvable (404) coupe TOUT au poll suivant (<= 30 s)
+     sans refresh.
+     v5.24.1 = retours terrain du 19/10 : (1) barre du haut : 8 s
+     AUSSI au rafraichissement - le barFlash(1500) d openProfil
+     (lance au chargement mobile) ANNULAIT le timer de 8 s du boot ;
+     il ne flash plus que si la barre n est pas deja affichee.
+     (2) BADGE FIABILITE ALTI : au DEBUT de la section (gauche,
+     plus jamais au centre - masque par la poignee) ; "gpslogger"
+     en ENTIER ROUGE NON BARRE (seule la forme courte "g" est
+     barree) ; "mixte"/"m" en ORANGE #e8a04c (plus de vert).
+     v5.24.0 = (1) bouton Direct : VERT CLIGNOTANT des l apparition
+     (mouvement percu) et JUSQU AU PREMIER CLIC - ensuite plus
+     jamais de clignotement (clic 1 : orange en mode direct ; clic
+     suivant : vert fixe apres sortie). (2) barre du haut : 8 s a
+     la 1re photo d une nouvelle date, 1 s au defile. (3) BADGE
+     FIABILITE ALTI au-dessus de chaque section journalnee :
+     garmin (plus de 85 pour cent de la distance en points garmin),
+     mixte, gpslogger BARRE - source profil.json "src" (build_daily
+     v5.2.28 : fraction distance a points espaces de 25 s max).
      v5.23.1 = (a) LIVE en ROUGE vif #e63946 (trace pointillee +
      pointeur live, etait orange). (b) bloc commentaire/photo de
      l ancienne photo MASQUE en mode direct (restaure a la sortie).
@@ -294,7 +318,8 @@
   #btLive{position:absolute;right:10px;bottom:10px;z-index:1100;display:none;align-items:center;gap:6px;padding:9px 13px;border-radius:10px;border:1px solid #40916c;background:#2d6a4fee;color:#fff;font-size:14px;font-weight:700;cursor:pointer;backdrop-filter:blur(4px);box-shadow:0 3px 8px rgba(0,0,0,.45)}
   #btLive:hover{background:#3a7f62}
   #btLive.on{background:#ff7a00;border-color:#b35300}
-  #btLive.blink{animation:liveblink .7s steps(2,start) 9}
+  /* v5.24 : clignotement PERMANENT (jusqu'au 1er clic sur le bouton) */
+  #btLive.blink{animation:liveblink .7s steps(2,start) infinite}
   @keyframes liveblink{50%{opacity:.2}}
   /* v5.22 : sonde live (point tape sur la trace/courbe) + cycliste */
   #mkprobe{position:absolute;z-index:600;transform:translate(-50%,-100%);text-align:center;line-height:1}
@@ -569,8 +594,6 @@ const REPO = "gurtsepaqrt87/gkr63x-g84zwo";
 // REELLE reste la rotation du dépôt données (MOP partie 7 §4).
 const AMIS = {
   // "exemple": "2026-12-31",   // <- 1 ligne par ami, code arbitraire
-"v1": "2026-12-31",
-"v2": "2026-11-30"
 };
 if (location.search.includes("ami=")) {
   const q = new URLSearchParams(location.search).get("ami");
@@ -596,9 +619,9 @@ let zoom = 11, clon = -1.85, clat = 48.15;   // centre initial (cadrage auto ens
 let ox = 0, oy = 0;
 let media = [], marks = [], traces = [];
 // v5.17 : live (position gpslogger du jour, poussee par live.py)
-let live = null, liveTrace = [], liveEl = null;
+let live = null, liveTrace = [], liveEl = null, liveSeen = false;   // v5.24 : liveSeen = 1er clic sur le bouton Direct
 // v5.17.1 : km par journee (profil.json "km", charge au boot)
-let kmData = null;
+let kmData = null, srcData = null, barLastDate = null;   // v5.24 : src = fiabilite alti (garmin/gpslogger), barLastDate = tempo 8 s
 let sel = -1, userResized = false;   // userResized : l'utilisateur a glisse la poignee -> plus d'ajustement auto
 const ZMIN = 3, ZMAX = 16;   // v5.16 : ZMAX 18->16, butee anti "page
                              // bleue" (au-dela de 16, tuiles vides/ocean)
@@ -836,12 +859,19 @@ async function pollLive() {
       }
     } else { renderLive(); }
     updLiveBtn();                       // v5.22 : bouton/clignotement/exit auto
-  } catch (e) { /* live.json absent (feature OFF ou jamais poussee) */
+  } catch (e) { /* live.json absent (feature OFF ou purge du toggle) :
+      v5.24.2 : REMETTRE A ZERO - avant, la derniere position restait
+      en memoire et liveValid() restait vrai jusqu'a 30 min : le
+      bouton Direct ne disparaissait qu'au refresh manuel. Desormais
+      le bouton disparaît au poll suivant (<= 30 s). */
+    if (live) {
+      live = null; liveTrace = []; parseLivePts(); render();
+    }
     updLiveBtn(); }
 }
 
 // ---------- v5.22 : MODE DIRECT (live <> classique) ----------
-let liveMode = false, livePts = [], liveProbe = null, probeEl = null, liveWasMov = false;
+let liveMode = false, livePts = [], liveProbe = null, probeEl = null;
 function liveMoving() { return liveValid() && (Date.now() / 1000 - live.t) < 600; }
 function fmtH(t) {                      // epoch s -> "HH:MM"
   const d = new Date(t * 1000);
@@ -863,14 +893,13 @@ function updLiveBtn() {
   const ok = liveValid();
   b.style.display = ok ? "flex" : "none";
   b.classList.toggle("on", liveMode);
-  const mov = liveMoving();
-  // clignote 6 s a chaque (re)demarrage du deplacement (apres pause)
-  if (ok && mov && !liveWasMov) {
-    b.classList.add("blink");
-    setTimeout(() => b.classList.remove("blink"), 6300);
-  }
-  if (!mov) b.classList.remove("blink");
-  liveWasMov = mov;
+  // v5.24 : clignote en VERT des l'apparition tant que le cycliste
+  // est en mouvement - et jusqu'au PREMIER clic sur le bouton.
+  // Apres le 1er clic (liveSeen), le bouton ne clignotera PLUS
+  // JAMAIS : 1er clic -> orange en mode direct, clic suivant ->
+  // retour au vert fixe apres sortie, etc.
+  if (ok && liveMoving() && !liveSeen) b.classList.add("blink");
+  if (!ok || liveSeen || !liveMoving()) b.classList.remove("blink");
   // live coupe (widget OFF) ou perime -> retour automatique au classique
   if (!ok && liveMode) exitLive();
 }
@@ -915,6 +944,7 @@ function exitLive() {
 }
 document.getElementById("btLive").onclick = e => {
   e.stopPropagation();
+  liveSeen = true;            // v5.24 : 1er clic -> plus jamais de clignotement
   if (liveMode) exitLive();
   else if (liveValid()) enterLive();
 };
@@ -1299,7 +1329,11 @@ function openGal(i) {
   // le menu Date suit le media affiche
   if (profilOn) { syncPrDates(); drawProfil(false);   // v5.16.13 : contenu seul au defilement - geometrie immuable
                  if (wrapEl.classList.contains("p3")) centerActive(); }
-  barFlash();                                    // v5.15.6 : barre flottante
+  // v5.24 : barre du haut - 8 s a la 1re photo d'une NOUVELLE date
+  // (ou au changement de date), disparition RAPIDE (1 s) au defile
+  // des photos de la meme date.
+  if (m.date !== barLastDate) { barLastDate = m.date; barFlash(8000); }
+  else barFlash();                                    // v5.15.6 : barre flottante
   const dSel = document.getElementById("btDate");
   if (dSel.value !== m.date) dSel.value = m.date;
   applySel();
@@ -1464,7 +1498,7 @@ document.getElementById("hdLayout").onclick = toggleLayout;
 document.getElementById("btLayoutM").onclick = toggleLayout;
 // v5.15.6 : au chargement en 2 fenetres, montrer la barre flottante
 // une fois (1,5 s) que l'utilisateur sache ou la trouver (⌄ ensuite)
-setTimeout(() => barFlash(1500), 400);
+setTimeout(() => { barLastDate = null; barFlash(8000); }, 400);   // v5.24 : 8 s a l'ouverture
 // glisse vertical > 60 px sur la photo ou la carte = bascule panneau
 function bindVerticalSwipe(el) {
   let s = null;
@@ -1557,7 +1591,11 @@ async function openProfil() {
       && !wrapEl.classList.contains("alti")) {
     if (MOBILE) {
       wrapEl.classList.add("p3");   // "3 fenetres" smartphone
-      barFlash(1500);                // v5.15.6 : barre flash 1,5 s a l'ouverture
+      // v5.24.1 : le flash 1,5 s d openProfil (appele AU CHARGEMENT
+      // mobile) ANNULAIT le timer de 8 s du boot -> barre courte au
+      // rafraichissement. On ne flash que si la barre n est pas
+      // deja affichee (ouverture manuelle de l alti plus tard).
+      if (!wrapEl.classList.contains("baron")) barFlash(1500);
       centerActive();                // v5.16 : carte centree sur la photo affichee
     }
     // laptop : overlay simple, aucune classe supplementaire
@@ -1851,6 +1889,45 @@ function drawProfilContent(svg, W, H) {
     pl.setAttribute("points", dp); pl.setAttribute("fill", "none");
     pl.setAttribute("stroke", prColor(b.d)); pl.setAttribute("stroke-width", "2");
     svg.appendChild(pl);
+    // v5.24.1 : BADGE FIABILITE ALTI au DEBUT (gauche) de la section
+    // journalnee - le CENTRE etait masque par la poignee ⌄.
+    // srcData[d] (profil.json "src", build_daily v5.2.28) = part de
+    // DISTANCE garmin (0..1). >= 85 % -> "garmin" VERT ; <= 15 % ->
+    // "gpslogger" ROUGE NON BARRE (seule la forme courte "g" est
+    // barree) ; sinon "mixte" ORANGE. Forme courte (g/m) si plus
+    // de 3 journees affichees, mot entier sinon.
+    if (!liveMode && srcData) {
+      const frac = srcData[b.d];
+      if (frac != null) {
+        const plein = blocks.length <= 3;
+        let txt, col, strike = false;
+        if (frac >= 0.85) { txt = plein ? "garmin" : "g"; col = "#9fd6a0"; }
+        else if (frac <= 0.15) {
+          txt = plein ? "gpslogger" : "g"; col = "#e07b7b";
+          strike = !plein;             // v5.24.1 : mot entier NON barre
+        }
+        else { txt = plein ? "mixte" : "m"; col = "#e8a04c"; }   // orange
+        const x0 = X(b.t0), x1 = X(b.t1);
+        if (x0 != null && x1 != null) {
+          const bx = x0 + 4;           // v5.24.1 : DEBUT de section
+          const bt = document.createElementNS(NSVG, "text");
+          bt.setAttribute("x", bx); bt.setAttribute("y", 12);
+          bt.setAttribute("text-anchor", "start");
+          bt.setAttribute("font-size", plein ? "10" : "11");
+          bt.setAttribute("font-weight", "700");
+          bt.setAttribute("fill", col);
+          bt.textContent = txt; svg.appendChild(bt);
+          if (strike) {                 // barre le "g" court (gpslogger)
+            const bl = document.createElementNS(NSVG, "line");
+            const w = bt.getComputedTextLength ? bt.getComputedTextLength() : 30;
+            bl.setAttribute("x1", bx - 1); bl.setAttribute("x2", bx + w + 1);
+            bl.setAttribute("y1", 9); bl.setAttribute("y2", 9);
+            bl.setAttribute("stroke", col); bl.setAttribute("stroke-width", "1.2");
+            svg.appendChild(bl);
+          }
+        }
+      }
+    }
     if (bi > 0) {                        // separateur discret entre journees
       const sx = X(b.t0);
       const sl = document.createElementNS(NSVG, "line");
@@ -2178,7 +2255,8 @@ async function load() {
     // v5.17.1 : profil.json au BOOT pour le badge km (variable kmData
     // dediee : le panneau alti garde son chargement differe profilData
     // et la construction de ses puces de dates).
-    try { kmData = (await (await fetch(BASE + "/profil.json?v=" + Date.now())).json()).km || null; }
+    try { const pj = await (await fetch(BASE + "/profil.json?v=" + Date.now())).json();
+          kmData = pj.km || null; srcData = pj.src || null; }   // v5.24 : src = part garmin (0..1) par date
     catch (e) { kmData = null; }
     if (media.length) {
       let n = 90, s = -90, w = 180, e = -180;
